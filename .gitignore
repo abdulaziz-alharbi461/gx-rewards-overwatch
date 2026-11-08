@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Private runtime data — never commit these
+config.json
+ledger.json
+logs/
+*.log
+
+# Runtime markers and locks
+run.lock
+.owned
+.bnet-hidden
+.bnet-launcher.log
+*.marker
+
+# OS / editor noise
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Temp files
+*.tmp
+~$*

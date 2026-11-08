@@ -1,0 +1,32 @@
+{
+  "name": "gx-rewards-overwatch",
+  "version": "1.0.0",
+  "description": "Unattended GX Rewards × Overwatch daily reward claiming with automatic in-app Battle.net code redemption.",
+  "main": "daily.js",
+  "bin": {
+    "gx-rewards": "daily.js"
+  },
+  "scripts": {
+    "start": "node daily.js",
+    "setup": "powershell -ExecutionPolicy Bypass -File ./setup.ps1",
+    "syntax": "node --check daily.js && node --check bnet-redeem.js && node --check cdp.js && node --check notify.js && node --check owned.js && node --check windows.js && node --check redeem.js",
+    "test": "npm run syntax"
+  },
+  "keywords": [
+    "gx-rewards",
+    "overwatch",
+    "battle-net",
+    "automation",
+    "cdp",
+    "windows",
+    "scheduled-task"
+  ],
+  "author": "abdulaziz-alharbi461",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright-core": "^1.64.1"
+  }
+}
