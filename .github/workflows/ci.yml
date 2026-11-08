@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    name: Syntax checks (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: JavaScript syntax
+        shell: pwsh
+        run: |
+          $files = @(
+            'daily.js', 'bnet-redeem.js', 'cdp.js', 'notify.js',
+            'owned.js', 'windows.js', 'redeem.js'
+          )
+          $failed = $false
+          foreach ($f in $files) {
+            node --check $f
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error file=$f::Syntax error in $f"
+              $failed = $true
+            } else {
+              Write-Host "OK  $f"
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: PowerShell parser
+        shell: pwsh
+        run: |
+          $files = @(
+            'setup.ps1', 'setup-task.ps1', 'launch-bnet-hidden.ps1',
+            'start-console.ps1', 'place-window.ps1', 'displays.ps1',
+            'foreground.ps1', 'sysinfo.ps1'
+          )
+          $failed = $false
+          foreach ($f in $files) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $f), [ref]$null, [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Host "::error file=$f::$($_.Message)" }
+              $failed = $true
+            } else {
+              Write-Host "OK  $f"
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: JSON validity
+        shell: pwsh
+        run: |
+          Get-Content package.json -Raw | ConvertFrom-Json | Out-Null
+          Write-Host 'package.json is valid JSON'

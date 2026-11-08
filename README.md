@@ -4,6 +4,7 @@
 
 A small, dependency-light Windows automation that wakes your PC at the right moment, claims the next Overwatch reward on [GX Rewards](https://gx.me), redeems the resulting code inside the **Battle.net desktop app**, sends you a phone notification, and then puts everything back the way it was — without ever stealing focus from a game.
 
+[![CI](https://github.com/abdulaziz-alharbi461/gx-rewards-overwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/abdulaziz-alharbi461/gx-rewards-overwatch/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6.svg)](#requirements)
 [![Node.js](https://img.shields.io/badge/node-%E2%89%A520-339933.svg)](https://nodejs.org)
