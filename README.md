@@ -57,7 +57,7 @@ This project turns that into a fully unattended routine:
 |  **Self-rescheduling** | After every run it schedules the next unlock, or retries in 30 minutes if the reward isn't ready yet. |
 |  **Wake-to-run, sleep-to-restore** | The task can wake the PC from sleep. If *it* woke the machine and nobody is around, it puts it back to sleep afterwards. |
 |  **In-app redemption** | Codes are redeemed inside the installed Battle.net app via CDP — no browser session, no password. |
-| 🕶️ **Hidden while gaming** | If a Blizzard game is running, the Battle.net app launches on a private Windows desktop: no window, no focus change, no fullscreen drop. |
+|  **Hidden while gaming** | If a Blizzard game is running, the Battle.net app launches on a private Windows desktop: no window, no focus change, no fullscreen drop. |
 |  **Second-monitor UI** | Outside of games, windows open on the secondary monitor (minimised first). On a single-monitor PC they stay minimised. |
 |  **Multi-channel notifications** | ntfy (default, phone push), Telegram, Discord, and a desktop toast — with full UTF-8 support. |
 |  **Clean by design** | Everything the run opened is closed afterwards, unless you're actively using it. A stale session is never left running. |
