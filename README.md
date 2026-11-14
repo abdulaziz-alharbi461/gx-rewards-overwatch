@@ -340,6 +340,7 @@ Redeem statuses: `ok`, `already`, `dry-run`, `error`, `unknown`, `login_required
 | `Battle.net did not open the debug port (9223)` | The app may be mid-update. Open it manually once, sign in, close it, rerun. |
 | No notification | Confirm the topic in `config.json` matches the one subscribed in the ntfy app. Run `node notify.js "test" "hello"`. |
 | `Battle.net login needed` notification | A code is waiting but the app is signed out. Sign in once; it redeems on the next run. |
+| `GX login needed` notification | The `gx.me` session in Opera GX expired. Sign in once at `https://gx.me` with the same Battle.net account linked to Overwatch. The run is not an error: the script skips the claim, still redeems any pending code, exits `0`, retries every 30 minutes and repeats the reminder at most once every 12 hours. |
 | Nothing runs at the scheduled time | `Get-ScheduledTaskInfo -TaskName "GX Rewards - Overwatch Daily"` — check `LastTaskResult` and `NextRunTime`. Confirm “Wake the computer to run this task” is enabled in Task Scheduler. |
 | Windows Defender / SmartScreen warns | The scripts are unsigned PowerShell/VBS launchers. Review the source; the project is fully open. |
 | First run claimed nothing | The reward gate may not be open yet. Use `--force` and check `logs\` for `not unlocked yet`. |

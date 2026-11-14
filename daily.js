@@ -203,8 +203,33 @@ async function fetchState(page) {
     return r.text();
   }, `https://api.gx.me/me/rewards/game-passes/${CFG.gpAlias}`);
   const j = JSON.parse(txt);
-  if (!j || !j.data) throw new Error('bad state payload: ' + txt.slice(0, 200));
+  if (!j || !j.data) {
+    const code = (j && j.errors && j.errors[0] && j.errors[0].code) || null;
+    const err = new Error(code === 'sign_in_required'
+      ? 'GX session expired (sign_in_required)'
+      : 'bad state payload: ' + txt.slice(0, 200));
+    if (code) err.code = code;
+    throw err;
+  }
   return j.data;
+}
+
+/** GX API error code from a claim response body, or null. */
+function apiErrorCode(body) {
+  try { return JSON.parse(body).errors[0].code || null; } catch { return null; }
+}
+
+/**
+ * fetchState that treats a signed-out GX session as a normal state instead of
+ * a crash: returns { state: null, loginRequired: true } in that case.
+ */
+async function safeFetchState(page) {
+  try {
+    return { state: await fetchState(page), loginRequired: false };
+  } catch (err) {
+    if (err && err.code === 'sign_in_required') return { state: null, loginRequired: true };
+    throw err;
+  }
 }
 
 async function postClaim(page) {
@@ -602,62 +627,102 @@ async function main() {
   try {
     const page = await gxPage(ctx);
 
-    let state = await fetchState(page);
-    ledger.lastCheck = now;
-    ledger.nextUnlockAt = state.nextUnlockAt || null;
+    const first = await safeFetchState(page);
+    let state = first.state;
+    let loginRequired = first.loginRequired;
 
-    // 1) reconcile: pick up rewards claimed outside this script, or codes that arrived late
-    const adopted = syncLedger(state, ledger);
-    if (adopted) log(`found ${adopted} previously claimed reward(s) not tracked yet`);
-    saveLedger(ledger);
-
-    const unclaimed = state.rewards.filter(r => !r.hasBeenClaimed);
+    // A signed-out GX session is a normal, recoverable state: skip the claim,
+    // still redeem pending codes, and let the user sign in once at gx.me.
+    if (loginRequired) {
+      result.loginRequired = true;
+      log('GX session expired: sign in once at https://gx.me inside Opera GX');
+    }
 
     // 2) claim today's reward when the gate is open
     let justClaimed = false;
-    if (!unclaimed.length) {
-      log('all 24 rewards are claimed.');
-      ledger.done = true;
-    } else {
-      const unlockAt = state.nextUnlockAt ? Date.parse(state.nextUnlockAt) : 0;
-      if (unlockAt - Date.now() > UNLOCK_TOLERANCE_MS && !FORCE) {
-        log(`not unlocked yet: next reward at ${state.nextUnlockAt}`);
-      } else {
-        log('claiming the next reward...');
-        const claim = await postClaim(page);
-        log(`claim response: ${claim.status} ${claim.body.slice(0, 300)}`);
 
-        if (claim.status === 200) {
-          await sleep(3000);
-          state = await fetchState(page);
-          ledger.nextUnlockAt = state.nextUnlockAt || null;
-          syncLedger(state, ledger);
-          justClaimed = true;
+    if (state) {
+      ledger.lastCheck = now;
+      ledger.nextUnlockAt = state.nextUnlockAt || null;
+
+      // Only an authenticated claim response proves the session is healthy -
+      // the game-pass state endpoint answers even when signed out.
+      const markSessionOk = () => {
+        if (ledger.lastGxLoginNotice) {
+          delete ledger.lastGxLoginNotice;
+          log('GX session is healthy again; login reminder reset');
+        }
+      };
+
+      // 1) reconcile: pick up rewards claimed outside this script, or codes that arrived late
+      const adopted = syncLedger(state, ledger);
+      if (adopted) log(`found ${adopted} previously claimed reward(s) not tracked yet`);
+      saveLedger(ledger);
+
+      const unclaimed = state.rewards.filter(r => !r.hasBeenClaimed);
+
+      if (!unclaimed.length) {
+        log('all 24 rewards are claimed.');
+        ledger.done = true;
+      } else {
+        const unlockAt = state.nextUnlockAt ? Date.parse(state.nextUnlockAt) : 0;
+        if (unlockAt - Date.now() > UNLOCK_TOLERANCE_MS && !FORCE) {
+          log(`not unlocked yet: next reward at ${state.nextUnlockAt}`);
         } else {
-          let errCode = null;
-          try { errCode = JSON.parse(claim.body).errors[0].code; } catch {}
-          if (errCode === 'reward_not_available') {
+          log('claiming the next reward...');
+          const claim = await postClaim(page);
+          log(`claim response: ${claim.status} ${claim.body.slice(0, 300)}`);
+
+          if (claim.status === 200) {
             await sleep(3000);
-            const s2 = await fetchState(page);
-            ledger.nextUnlockAt = s2.nextUnlockAt || ledger.nextUnlockAt;
-            log(`still locked; next unlock ${ledger.nextUnlockAt}`);
+            markSessionOk();
+            const after = await safeFetchState(page);
+            if (after.state) {
+              state = after.state;
+              ledger.nextUnlockAt = state.nextUnlockAt || null;
+              syncLedger(state, ledger);
+            } else {
+              loginRequired = true;
+              result.loginRequired = true;
+              log('GX session expired right after claiming: sign in once at https://gx.me inside Opera GX');
+            }
+            justClaimed = true;
           } else {
-            throw new Error(`claim failed: ${claim.status} ${claim.body}`);
+            const errCode = apiErrorCode(claim.body);
+            if (errCode === 'reward_not_available') {
+              await sleep(3000);
+              const again = await safeFetchState(page);
+              if (again.state) {
+                markSessionOk();
+                ledger.nextUnlockAt = again.state.nextUnlockAt || ledger.nextUnlockAt;
+                log(`still locked; next unlock ${ledger.nextUnlockAt}`);
+              }
+            } else if (errCode === 'sign_in_required' || claim.status === 401) {
+              loginRequired = true;
+              result.loginRequired = true;
+              log('GX session expired while claiming: sign in once at https://gx.me inside Opera GX');
+            } else {
+              throw new Error(`claim failed: ${claim.status} ${claim.body}`);
+            }
           }
         }
       }
+      saveLedger(ledger);
     }
-    saveLedger(ledger);
 
-    // 3) redeem anything pending
+    // 3) redeem anything pending - codes already in the ledger do not need a GX session
     const pendingCount = pendingRedeems(ledger).length;
     if (!pendingCount) {
       if (justClaimed) log('claim ok, but the code has not been issued yet (will retry next run)');
+      if (loginRequired) return { ...result, action: 'login-required' };
       return { action: justClaimed ? 'claimed-no-code' : (ledger.done ? 'done' : 'skip') };
     }
 
     await redeemPending(ledger, result, justClaimed);
 
+    if (loginRequired && !result.claimed.length && !result.redeemed.length) {
+      return { ...result, action: 'login-required' };
+    }
     result.action = result.claimed.length || result.redeemed.length ? 'claimed' : (ledger.done ? 'done' : 'skip');
     return result;
   } finally {
@@ -704,6 +769,26 @@ function computeNextRun(ledger, res) {
   return when;
 }
 
+/**
+ * Reminds the user that the GX session expired, at most once every 12 hours,
+ * so a signed-out session never turns into an alert every 30 minutes.
+ */
+async function notifyGxLoginNeeded() {
+  const led = loadLedger();
+  const last = led.lastGxLoginNotice ? Date.parse(led.lastGxLoginNotice) : 0;
+  if (Date.now() - last < 12 * 3600 * 1000) {
+    log('GX login reminder already sent in the last 12h; not notifying again');
+    return;
+  }
+  await notify(
+    'GX Rewards: GX login needed',
+    'The GX session in Opera GX expired. Sign in once at https://gx.me with the same Battle.net account linked to Overwatch - the script then claims the next reward on its own.',
+    'high',
+  );
+  led.lastGxLoginNotice = new Date().toISOString();
+  saveLedger(led);
+}
+
 async function finish() {
   let res = null;
   try {
@@ -713,6 +798,8 @@ async function finish() {
       if (res && res.redeemed.length) {
         await notify('GX Rewards: code redeemed', `Battle.net: ${res.redeemed.join(', ')}`);
       }
+    } else if (res && res.action === 'login-required') {
+      await notifyGxLoginNeeded();
     } else if (res && res.action === 'claimed') {
       await notify(
         'GX Rewards: reward claimed',
@@ -724,6 +811,9 @@ async function finish() {
       await notify('GX Rewards: ALL DONE', 'All 24 Overwatch rewards have been claimed. Automation stopped.');
       removeScheduledTask();
     }
+
+    // the GX session was already reported as expired, but the run still redeemed
+    if (res && res.loginRequired && res.action !== 'login-required') await notifyGxLoginNeeded();
 
     // a code is stuck because Battle.net wants a manual login: remind at most twice a day
     const led = loadLedger();
