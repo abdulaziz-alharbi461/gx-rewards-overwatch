@@ -55,6 +55,7 @@ This project turns that into a fully unattended routine:
 |---|---|
 |  **Exact-time scheduling** | Reads `nextUnlockAt` from GX and moves a single Windows task to that moment + 2 min. One wake per day instead of polling every 30 minutes. |
 |  **Self-rescheduling** | After every run it schedules the next unlock, or retries in 30 minutes if the reward isn't ready yet. |
+|  **Self-healing login** | If the `gx.me` session expires, the run signs in again with the Battle.net session already saved in Opera GX, then retries the claim in the same run. No password is stored or typed. |
 |  **Wake-to-run, sleep-to-restore** | The task can wake the PC from sleep. If *it* woke the machine and nobody is around, it puts it back to sleep afterwards. |
 |  **In-app redemption** | Codes are redeemed inside the installed Battle.net app via CDP — no browser session, no password. |
 |  **Hidden while gaming** | If a Blizzard game is running, the Battle.net app launches on a private Windows desktop: no window, no focus change, no fullscreen drop. |
@@ -100,6 +101,7 @@ Task Scheduler
 **Key design choices**
 
 - **Real browser, real session.** Opera GX is launched with `--remote-debugging-port=9222` and attached over CDP, so the existing `gx.me` login cookies are reused. Nothing is scraped from a password store.
+- **Self-healing session.** When `gx.me` reports `sign_in_required`, the script presses “Log in with Battle.net” on the campaign page and lets the Battle.net session saved in Opera GX finish the SSO. It only stops and asks you when Battle.net demands a password, a 2FA code, or the Cloudflare challenge needs a human.
 - **API-level claim.** The claim is a `POST` to GX's `claim-reward` endpoint executed *inside the page context*, so it carries the same cookies and CSRF behavior as the website.
 - **In-app redeem, not web.** The Battle.net desktop app stays signed in, so codes are typed into its own “Redeem a code” window over CDP. A custom minimal CDP client is used because Playwright cannot attach to CEF.
 - **Hidden desktop for games.** During a match a normal window would activate itself and can drop the game out of fullscreen. `launch-bnet-hidden.ps1` creates a private desktop and starts the app there, so the game keeps the foreground for the entire run.
@@ -219,6 +221,7 @@ node notify.js "اختبار" "تم الاتصال بنجاح"
 | `--no-power` | Never put the PC back to sleep. |
 | `--keep-open` | Leave every window this run opened (for debugging). |
 | `--redeem-only` | Redeem pending codes from the ledger only — does not open Opera GX. |
+| `--no-relogin` | Never try to restore an expired `gx.me` session automatically; just report that a login is needed. |
 
 ### `node redeem.js CODE`
 
@@ -340,7 +343,7 @@ Redeem statuses: `ok`, `already`, `dry-run`, `error`, `unknown`, `login_required
 | `Battle.net did not open the debug port (9223)` | The app may be mid-update. Open it manually once, sign in, close it, rerun. |
 | No notification | Confirm the topic in `config.json` matches the one subscribed in the ntfy app. Run `node notify.js "test" "hello"`. |
 | `Battle.net login needed` notification | A code is waiting but the app is signed out. Sign in once; it redeems on the next run. |
-| `GX login needed` notification | The `gx.me` session in Opera GX expired. Sign in once at `https://gx.me` with the same Battle.net account linked to Overwatch. The run is not an error: the script skips the claim, still redeems any pending code, exits `0`, retries every 30 minutes and repeats the reminder at most once every 12 hours. |
+| `GX login needed` notification | The `gx.me` session in Opera GX expired **and** the automatic re-login could not finish (Battle.net asked for a password/2FA, or the Cloudflare challenge needed a human). Sign in once at `https://gx.me` with the same Battle.net account linked to Overwatch. The run is not an error: it skips the claim, still redeems any pending code, exits `0`, retries every 30 minutes and repeats the reminder at most once every 12 hours. |
 | Nothing runs at the scheduled time | `Get-ScheduledTaskInfo -TaskName "GX Rewards - Overwatch Daily"` — check `LastTaskResult` and `NextRunTime`. Confirm “Wake the computer to run this task” is enabled in Task Scheduler. |
 | Windows Defender / SmartScreen warns | The scripts are unsigned PowerShell/VBS launchers. Review the source; the project is fully open. |
 | First run claimed nothing | The reward gate may not be open yet. Use `--force` and check `logs\` for `not unlocked yet`. |

@@ -59,6 +59,8 @@ const NO_POWER = process.argv.includes('--no-power');
 const KEEP_OPEN = process.argv.includes('--keep-open');
 // Redeem codes that are already in the ledger without opening Opera at all.
 const REDEEM_ONLY = process.argv.includes('--redeem-only');
+// Never try to restore an expired GX session on our own.
+const NO_RELOGIN = process.argv.includes('--no-relogin');
 
 // True when this run started (or restarted) the app itself. Apps this run
 // launched are always closed afterwards, even if Windows focused them - the
@@ -197,6 +199,93 @@ async function gxPage(ctx) {
   return p;
 }
 
+/**
+ * Restores an expired GX session without a human, when possible.
+ *
+ * The sign-out page asks for the Terms checkbox and a Cloudflare Turnstile
+ * token, then "Log in with Battle.net". The Battle.net session usually still
+ * lives in the Opera GX profile, so pressing "Log in" completes the SSO by
+ * itself. Nothing is typed and no credential is stored: if Battle.net asks for
+ * a password or a 2FA code, the attempt stops and a human is needed.
+ *
+ * Returns 'ok' | 'needs-user' | 'no-form' | 'no-button' | 'no-token'.
+ */
+async function attemptGxLogin(ctx, page) {
+  const bodyText = () => page.evaluate(() => document.body.innerText || '').catch(() => '');
+
+  if (!page.url().includes('gx.me/gx/')) {
+    await page.goto(CFG.campaignUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    await sleep(5000);
+  }
+
+  // already signed in? (the sign-out page always shows the SSO prompt)
+  const signOutPage = (t) => /log in with battle\.net/i.test(t);
+  if (!signOutPage(await bodyText())) return 'ok';
+
+  // 1) the Terms checkbox must be ticked before "Log in" does anything
+  const tickTerms = async () => page.evaluate(() => {
+    const cb = document.querySelector('input[type="checkbox"]');
+    if (cb && !cb.checked) cb.click();
+  });
+
+  // 2) Cloudflare Turnstile: the non-interactive token can take a couple of
+  //    minutes, especially on a fresh profile - reload once and wait again.
+  const readToken = () => page.evaluate(() =>
+    (document.querySelector('[name="cf-turnstile-response"]') || {}).value || '');
+  const waitToken = async (ms) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      const t = await readToken();
+      if (t) return t;
+      await sleep(2000);
+    }
+    return '';
+  };
+
+  let token = '';
+  for (let round = 1; round <= 2 && !token; round++) {
+    const hasBox = await page.evaluate(() => !!document.querySelector('input[type="checkbox"]'));
+    if (!hasBox) return 'no-form';
+    await tickTerms();
+    token = await waitToken(100 * 1000);
+    if (!token && round === 1) {
+      log('GX login: the Cloudflare challenge is slow; reloading the page once');
+      await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+      await sleep(6000);
+    }
+  }
+  if (!token) {
+    log('GX login: the Cloudflare challenge did not clear by itself');
+    return 'no-token';
+  }
+
+  // 3) press "Log in" and let the Battle.net SSO finish
+  const clicked = await page.evaluate(() => {
+    const el = [...document.querySelectorAll('button, a, [role="button"]')]
+      .find(x => /^log\s*in$/i.test((x.innerText || '').trim()) && (x.offsetWidth || x.offsetHeight));
+    if (!el) return false;
+    el.click();
+    return true;
+  });
+  if (!clicked) return 'no-button';
+
+  for (let i = 0; i < 25; i++) {
+    await sleep(3000);
+
+    // a password / 2FA form anywhere means only the account owner can continue
+    const needsHuman = await Promise.all(ctx.pages().map(p =>
+      p.evaluate(() => document.querySelectorAll('input[type="password"]').length > 0).catch(() => false),
+    ));
+    if (needsHuman.some(Boolean)) {
+      log('GX login: Battle.net is asking for a password or 2FA code');
+      return 'needs-user';
+    }
+
+    if (!signOutPage(await bodyText())) return 'ok';
+  }
+  return 'needs-user';
+}
+
 async function fetchState(page) {
   const txt = await page.evaluate(async (url) => {
     const r = await fetch(url, { credentials: 'include' });
@@ -241,6 +330,51 @@ async function postClaim(page) {
     });
     return { status: r.status, body: await r.text() };
   }, CFG.gpId);
+}
+
+/** An authenticated answer proves the session works: drop the reminder throttle. */
+function sessionHealthy(ledger) {
+  if (ledger.lastGxLoginNotice) {
+    delete ledger.lastGxLoginNotice;
+    log('GX session is healthy again; login reminder reset');
+  }
+}
+
+/**
+ * One claim attempt.
+ *   { outcome: 'ok' }     - reward claimed (post-claim state refreshed if possible)
+ *   { outcome: 'locked' } - the gate is not open yet
+ *   { outcome: 'login' }  - the GX session expired; the caller may sign in and retry
+ */
+async function claimRewardOnce(page, ledger) {
+  const claim = await postClaim(page);
+  log(`claim response: ${claim.status} ${claim.body.slice(0, 300)}`);
+
+  if (claim.status === 200) {
+    await sleep(3000);
+    const after = await safeFetchState(page);
+    if (after.state) {
+      ledger.nextUnlockAt = after.state.nextUnlockAt || null;
+      syncLedger(after.state, ledger);
+    }
+    sessionHealthy(ledger);
+    return { outcome: 'ok', loginAfter: !after.state };
+  }
+
+  const errCode = apiErrorCode(claim.body);
+  if (errCode === 'reward_not_available') {
+    await sleep(3000);
+    const again = await safeFetchState(page);
+    if (again.state) {
+      ledger.nextUnlockAt = again.state.nextUnlockAt || ledger.nextUnlockAt;
+      log(`still locked; next unlock ${ledger.nextUnlockAt}`);
+    }
+    sessionHealthy(ledger);
+    return { outcome: 'locked' };
+  }
+
+  if (errCode === 'sign_in_required' || claim.status === 401) return { outcome: 'login' };
+  throw new Error(`claim failed: ${claim.status} ${claim.body}`);
 }
 
 /** Add any claimed reward that is missing from the ledger, and refresh codes that arrived late. */
@@ -631,11 +765,23 @@ async function main() {
     let state = first.state;
     let loginRequired = first.loginRequired;
 
-    // A signed-out GX session is a normal, recoverable state: skip the claim,
-    // still redeem pending codes, and let the user sign in once at gx.me.
+    // A signed-out GX session is recoverable: try the saved Battle.net session
+    // first, and only fall back to asking you when that cannot work.
+    if (loginRequired && !NO_RELOGIN) {
+      log('GX session expired; trying to sign in with the saved Battle.net session...');
+      const relogin = await attemptGxLogin(ctx, page);
+      if (relogin === 'ok') {
+        const retry = await safeFetchState(page);
+        state = retry.state;
+        loginRequired = retry.loginRequired;
+        if (!loginRequired) log('signed in again automatically');
+      } else {
+        log(`GX login attempt: ${relogin}`);
+      }
+    }
     if (loginRequired) {
       result.loginRequired = true;
-      log('GX session expired: sign in once at https://gx.me inside Opera GX');
+      log('GX session still signed out: sign in once at https://gx.me inside Opera GX');
     }
 
     // 2) claim today's reward when the gate is open
@@ -644,15 +790,6 @@ async function main() {
     if (state) {
       ledger.lastCheck = now;
       ledger.nextUnlockAt = state.nextUnlockAt || null;
-
-      // Only an authenticated claim response proves the session is healthy -
-      // the game-pass state endpoint answers even when signed out.
-      const markSessionOk = () => {
-        if (ledger.lastGxLoginNotice) {
-          delete ledger.lastGxLoginNotice;
-          log('GX session is healthy again; login reminder reset');
-        }
-      };
 
       // 1) reconcile: pick up rewards claimed outside this script, or codes that arrived late
       const adopted = syncLedger(state, ledger);
@@ -670,40 +807,32 @@ async function main() {
           log(`not unlocked yet: next reward at ${state.nextUnlockAt}`);
         } else {
           log('claiming the next reward...');
-          const claim = await postClaim(page);
-          log(`claim response: ${claim.status} ${claim.body.slice(0, 300)}`);
+          let outcome = await claimRewardOnce(page, ledger);
 
-          if (claim.status === 200) {
-            await sleep(3000);
-            markSessionOk();
-            const after = await safeFetchState(page);
-            if (after.state) {
-              state = after.state;
-              ledger.nextUnlockAt = state.nextUnlockAt || null;
-              syncLedger(state, ledger);
+          // the session died mid-run: sign in again with the saved Battle.net
+          // session and retry the claim once
+          if (outcome.outcome === 'login' && !NO_RELOGIN) {
+            log('GX session expired while claiming; trying to sign in again...');
+            const relogin = await attemptGxLogin(ctx, page);
+            if (relogin === 'ok') {
+              log('signed in again; retrying the claim...');
+              outcome = await claimRewardOnce(page, ledger);
             } else {
+              log(`GX login attempt: ${relogin}`);
+            }
+          }
+
+          if (outcome.outcome === 'ok') {
+            justClaimed = true;
+            if (outcome.loginAfter) {
               loginRequired = true;
               result.loginRequired = true;
               log('GX session expired right after claiming: sign in once at https://gx.me inside Opera GX');
             }
-            justClaimed = true;
-          } else {
-            const errCode = apiErrorCode(claim.body);
-            if (errCode === 'reward_not_available') {
-              await sleep(3000);
-              const again = await safeFetchState(page);
-              if (again.state) {
-                markSessionOk();
-                ledger.nextUnlockAt = again.state.nextUnlockAt || ledger.nextUnlockAt;
-                log(`still locked; next unlock ${ledger.nextUnlockAt}`);
-              }
-            } else if (errCode === 'sign_in_required' || claim.status === 401) {
-              loginRequired = true;
-              result.loginRequired = true;
-              log('GX session expired while claiming: sign in once at https://gx.me inside Opera GX');
-            } else {
-              throw new Error(`claim failed: ${claim.status} ${claim.body}`);
-            }
+          } else if (outcome.outcome === 'login') {
+            loginRequired = true;
+            result.loginRequired = true;
+            log('GX session still signed out: sign in once at https://gx.me inside Opera GX');
           }
         }
       }
